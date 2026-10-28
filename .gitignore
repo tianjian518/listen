@@ -6,3 +6,8 @@ __pycache__/
 .venv/
 venv/
 .env
+# 运行时数据（含账号 / 听歌记录，绝不外传）
+tasks.json
+probe.json
+*.log
+server.log

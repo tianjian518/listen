@@ -1,6 +1,6 @@
 services:
   listen:
-    image: tianjian518/listen:1.1.0
+    image: tianjian518/listen:2.0.0
     # 想本地自己构建可改成：build: .
     container_name: listen
     ports:

@@ -58,13 +58,13 @@ def _drop_lib_cache():
     _LIB_CACHE["at"] = 0.0
     _LIB_CACHE["data"] = None
 
-tasks = TaskManager(DOWNLOAD_DIR)
+tasks = TaskManager(DOWNLOAD_DIR, BASE / "tasks.json")
 tasks.on_finish = lambda _tid: _drop_lib_cache()
 
 
 @app.on_event("startup")
 def _startup():
-    probe.start()  # 启动即自动体检所有音源
+    probe.start(BASE / "probe.json")  # 先读上次结果，再后台复检
 
 
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
@@ -262,7 +262,7 @@ def api_search(body: SearchBody):
 def thumb(vid: str):
     if vid in _THUMB_CACHE:
         return Response(_THUMB_CACHE[vid], media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": "public, max-age=2592000, immutable"})
     url = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
     try:
         r = httpx.get(url, timeout=12, follow_redirects=True)
@@ -271,7 +271,7 @@ def thumb(vid: str):
             if len(_THUMB_CACHE) > 500:
                 _THUMB_CACHE.pop(next(iter(_THUMB_CACHE)))
             return Response(r.content, media_type="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=86400"})
+                            headers={"Cache-Control": "public, max-age=2592000, immutable"})
     except Exception:
         pass
     return Response(status_code=404)
@@ -455,12 +455,27 @@ def api_tasks():
     return {"items": tasks.list()}
 
 
+@app.post("/api/tasks/retry-failed")
+def api_retry_all_failed():
+    """一键重试所有失败任务"""
+    n = tasks.retry_all_failed()
+    return {"ok": True, "count": n}
+
+
 @app.post("/api/tasks/{tid}/retry")
 def api_retry(tid: str):
     new_id = tasks.retry(tid)
     if not new_id:
         raise HTTPException(400, "这条任务不能重试")
     return {"task_id": new_id}
+
+
+@app.delete("/api/tasks/{tid}")
+def api_task_remove(tid: str):
+    """删除单条记录（运行中的不能删）"""
+    if not tasks.remove(tid):
+        raise HTTPException(400, "这条任务还在进行中，不能删除")
+    return {"ok": True}
 
 
 @app.delete("/api/tasks")

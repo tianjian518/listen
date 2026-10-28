@@ -7,3 +7,9 @@ venv/
 .git/
 .github/
 .env
+tasks.json
+probe.json
+*.log
+server.log
+mp.sh
+watchdog.sh

@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
+from pathlib import Path
 
 from .sources import all_sources
 
@@ -16,6 +18,33 @@ PROBE_KEYWORD = "晴天"
 _lock = threading.Lock()
 _state: dict = {"sources": [], "updated": 0.0, "probing": False}
 _started = False
+_state_file: Path | None = None
+
+
+def _load_state():
+    """重启后沿用上次体检结果，避免开机一段时间内全是“检测中”"""
+    global _state
+    if not _state_file or not _state_file.exists():
+        return
+    try:
+        d = json.loads(_state_file.read_text("utf-8"))
+        if isinstance(d, dict) and isinstance(d.get("sources"), list) and d["sources"]:
+            with _lock:
+                _state["sources"] = d["sources"]
+                _state["updated"] = float(d.get("updated") or 0)
+    except Exception:
+        pass
+
+
+def _save_state():
+    if not _state_file:
+        return
+    try:
+        with _lock:
+            data = {"updated": _state["updated"], "sources": [dict(s) for s in _state["sources"]]}
+        _state_file.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
 
 
 def snapshot() -> dict:
@@ -41,12 +70,18 @@ def healthy_sources() -> list:
 
 
 def _probe_one(src) -> dict:
+    """体检单个源：失败再试一次，避免一次网络抖动就判成不可用"""
     t0 = time.time()
     ok = False
-    try:
-        ok = bool(src.probe())
-    except Exception:
-        ok = False
+    for attempt in range(2):
+        try:
+            if src.probe():
+                ok = True
+                break
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(1.5)
     return {
         "name": src.name,
         "label": src.label,
@@ -67,12 +102,17 @@ def probe_all(background: bool = True):
         for src in all_sources():
             results.append(_probe_one(src))
             with _lock:
+                # 已重测的用新结果，还没轮到的沿用上次结果，避免列表中途缩水
+                merged = {s["name"]: dict(s) for s in _state["sources"]}
+                for x in results:
+                    merged[x["name"]] = x
                 _state["sources"] = sorted(
-                    results, key=lambda x: (not x["ok"], x["latency"])
+                    merged.values(), key=lambda x: (not x["ok"], x["latency"])
                 )
         with _lock:
             _state["updated"] = time.time()
             _state["probing"] = False
+        _save_state()
 
     if background:
         threading.Thread(target=_run, daemon=True).start()
@@ -80,12 +120,15 @@ def probe_all(background: bool = True):
         _run()
 
 
-def start():
-    """应用启动时调用：立即首测 + 定时复检"""
-    global _started
+def start(state_file=None):
+    """应用启动时调用：先载入上次结果，再后台复检"""
+    global _started, _state_file
     if _started:
         return
     _started = True
+    if state_file:
+        _state_file = Path(state_file)
+    _load_state()
 
     def _loop():
         probe_all(background=False)  # 首测同步跑，尽快给出可用源

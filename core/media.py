@@ -34,11 +34,14 @@ def search(keyword: str, limit: int = 18) -> list[dict]:
 
 def download_audio(video_id: str, title: str, out_dir: Path,
                    quality: str = "0", progress_cb=None,
-                   source: str = "invidious", host: str = "") -> Path:
+                   source: str = "invidious", host: str = "",
+                   gid: str = "") -> Path:
     src = get_source(source)
     if src is None:
         raise RuntimeError(f"未知音源：{source}")
-    item = {"id": video_id, "title": title, "source": source, "host": host}
+    # gid 是聚合源里的歌曲 ID，和视频 ID 不是一回事
+    item = {"id": gid or video_id, "video_id": video_id,
+            "title": title, "source": source, "host": host}
     return src.download(item, out_dir, progress_cb)
 
 

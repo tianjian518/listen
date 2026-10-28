@@ -6,7 +6,6 @@ const HOT = ['周杰伦', '邓紫棋', '陈奕迅', '五月天', '林俊杰', '�
 let status = { logged_in: false, yt_cookie: false };
 let qrTimer = null;
 let taskTimer = null;
-let libTimer = null;
 
 let player = { list: [], idx: -1, retried: false, now: false };
 const audio = () => $('#audio');
@@ -50,6 +49,7 @@ function go(page) {
   $$('.page').forEach((p) => { p.hidden = p.id !== 'page-' + page; });
   $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
   if (page === 'player') loadLibrary();
+  if (page === 'tasks') loadTasks();
   if (page === 'settings') { loadStatus(); loadSourceList(); renderSettings(); renderInvHosts(); }
   refreshPlayerUI();
   window.scrollTo(0, 0);
@@ -185,6 +185,7 @@ function renderResults(items, keyword, stale) {
         <div class="card-meta">${esc(it.uploader || '未知来源')}</div>
         <button class="save-btn" data-id="${esc(it.id)}" data-title="${esc(it.title)}"
                 data-source="${esc(it.source || 'invidious')}" data-host="${esc(it.host || '')}"
+                data-gid="${esc(it.gid || '')}" data-cover="${esc(it.thumb || it.cover || '')}"
                 onclick="transfer(this)">转存到云盘</button>
       </div>
     </article>`).join('');
@@ -202,7 +203,11 @@ async function transfer(btn) {
   try {
     await api('/api/transfer', {
       method: 'POST',
-      body: JSON.stringify({ video_id: id, title, source: btn.dataset.source, host: btn.dataset.host })
+      body: JSON.stringify({
+        video_id: id, title,
+        source: btn.dataset.source, host: btn.dataset.host,
+        gid: btn.dataset.gid || '', cover: btn.dataset.cover || '',
+      })
     });
     btn.classList.add('done');
     btn.textContent = '已加入队列';
@@ -215,122 +220,292 @@ async function transfer(btn) {
   }
 }
 
-/* ---------------- 转存任务（气泡 + 折叠面板） ---------------- */
-let taskShown = false;   // 面板是否被用户展开
-let doneFlashTimer = null;
+/* ---------------- 转存记录（独立页面） ---------------- */
+let lastTasks = [];   // 最近一次拉到的任务，新的在前
+let lastDoneSeen = -1; // 上次看到的已完成数量，用于判断有没有新歌进云盘
+let lastTaskSig = '';   // 任务列表指纹，没变化就不重绘
 
 function startTasks() {
   clearTimeout(taskTimer);
-  taskTimer = setTimeout(pollTasks, 800);
+  taskTimer = setTimeout(pollTasks, 500);
 }
 
 async function pollTasks() {
   clearTimeout(taskTimer);
   try {
     const data = await api('/api/tasks');
-    renderTasks((data.items || []).slice().reverse());
+    const items = (data.items || []).slice().reverse();
+    const sig = items.map((t) => [t.id, t.state, Math.round((t.progress || 0) * 100), t.message].join(':')).join('|');
+
+    if (sig !== lastTaskSig) {
+      lastTaskSig = sig;
+      lastTasks = items;
+      saveTasksCache(items);
+      updateNavBadge();
+      if (!$('#page-tasks').hidden) renderTaskPage();
+    }
+
+    // 有新歌转存成功 → 曲库标记过期；正在看播放器就立刻更新
+    const doneNow = lastTasks.filter((t) => t.state === 'done').length;
+    if (lastDoneSeen >= 0 && doneNow > lastDoneSeen) {
+      libDirty = true;
+      if (!$('#page-player').hidden) refreshLibrary({});
+    }
+    lastDoneSeen = doneNow;
     const active = (data.items || []).some((t) => t.state === 'running' || t.state === 'queued');
-    taskTimer = setTimeout(pollTasks, active ? 1000 : 8000);
+    taskTimer = setTimeout(pollTasks, active ? 1200 : 20000);
   } catch (e) {
     taskTimer = setTimeout(pollTasks, 8000);
   }
 }
 
-/* 完成 / 失败只闪一次，避免每次轮询都弹出来 */
-function flashFabOnce(kind, num, items) {
-  const tid = (items[0] && items[0].id) || '';
-  let seen = '';
-  try { seen = localStorage.getItem('listen.fabSeen.v1') || ''; } catch (e) { /* 忽略 */ }
-  if (!tid || tid === seen) return false;
-  try { localStorage.setItem('listen.fabSeen.v1', tid); } catch (e) { /* 忽略 */ }
-  const fab = $('#taskFab');
-  fab.hidden = false;
-  fab.classList.remove('done', 'err');
-  fab.classList.add(kind);
-  $('#fabNum').textContent = num;
-  doneFlashTimer = setTimeout(() => { fab.hidden = true; doneFlashTimer = null; }, 6000);
-  return true;
+/* 导航角标：进行中显示数量；全部结束但有失败时显示红色数字 */
+function updateNavBadge() {
+  const badge = $('#navBadge');
+  if (!badge) return;
+  const running = lastTasks.filter((t) => t.state === 'running' || t.state === 'queued').length;
+  const failed = lastTasks.filter((t) => t.state === 'failed').length;
+  if (running) {
+    badge.hidden = false;
+    badge.className = 'nav-badge';
+    badge.textContent = running;
+  } else if (failed) {
+    badge.hidden = false;
+    badge.className = 'nav-badge err';
+    badge.textContent = failed;
+  } else {
+    badge.hidden = true;
+  }
 }
 
-function renderTasks(items) {
-  const fab = $('#taskFab');
-  if (!fab) return;
-  const active = items.filter((t) => t.state === 'running' || t.state === 'queued');
-  const failed = items.filter((t) => t.state === 'failed').length;
-  const C = 2 * Math.PI * 15.5;
+const TASKS_KEY = 'listen.tasks.v1';
 
-  if (active.length > 0) {
-    // 有任务在跑：气泡显示数量 + 总进度环
-    fab.hidden = false;
-    fab.classList.remove('done', 'err');
-    const total = active.reduce((s, t) => s + (t.progress || 0), 0) / active.length;
-    $('#fabNum').textContent = active.length;
-    $('#fabRing').style.strokeDashoffset = C * (1 - total);
-  } else if (items.length && items[0].state === 'done' && !doneFlashTimer) {
-    // 刚全部完成：✓ 闪一次后消失（同一任务不重复提醒）
-    if (!flashFabOnce('done', '✓', items)) fab.hidden = true;
-  } else if (items.length && items[0].state === 'failed' && !doneFlashTimer) {
-    // 有失败：! 闪一次后消失，不长期挂着
-    if (!flashFabOnce('err', '!', items)) fab.hidden = true;
-  } else {
-    fab.hidden = true;
+function loadTasksCache() {
+  try {
+    const raw = localStorage.getItem(TASKS_KEY);
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.items) || !d.items.length) return false;
+    lastTasks = d.items;
+    updateNavBadge();
+    if (!$('#page-tasks').hidden) renderTaskPage();
+    return true;
+  } catch (e) { return false; }
+}
+
+function saveTasksCache(items) {
+  try {
+    localStorage.setItem(TASKS_KEY, JSON.stringify({ ts: Date.now(), items: items.slice(0, 60) }));
+  } catch (e) { /* 忽略 */ }
+}
+
+async function loadTasks(manual) {
+  // 先用现有数据/缓存画出来，切页回来不白屏
+  if (!lastTasks.length) loadTasksCache();
+  renderTaskPage();
+  await pollTasks();          // 后台再对一次，有变化会自己重绘
+  if (manual) toast('已刷新');
+}
+
+function ago(ts) {
+  if (!ts) return '';
+  const d = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (d < 60) return '刚刚';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  const days = Math.floor(d / 86400);
+  if (days === 1) return '昨天';
+  if (days < 30) return days + ' 天前';
+  return new Date(ts * 1000).toLocaleDateString('zh-CN');
+}
+
+function renderTaskPage() {
+  const sum = $('#taskSum');
+  const list = $('#taskList');
+  if (!sum || !list) return;
+
+  const items = lastTasks;
+  const running = items.filter((t) => t.state === 'running' || t.state === 'queued').length;
+  const done = items.filter((t) => t.state === 'done').length;
+  const failed = items.filter((t) => t.state === 'failed').length;
+
+  sum.innerHTML = `
+    <div class="task-stat">
+      <div class="ts-cell"><b class="ts-blue">${running}</b><span>进行中</span></div>
+      <div class="ts-cell"><b class="ts-green">${done}</b><span>已完成</span></div>
+      <div class="ts-cell"><b class="ts-red">${failed}</b><span>失败</span></div>
+    </div>
+    <div class="task-actions">
+      ${failed ? `<button class="btn sm" onclick="retryAllFailed()">一键重试失败 ${failed} 条</button>` : ''}
+      ${(done + failed) ? `<button class="btn ghost sm" onclick="clearTasks()">清空已结束</button>` : ''}
+    </div>`;
+
+  if (!items.length) {
+    list.innerHTML = `<div class="empty">
+      <div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"></path><path d="M3 6h.01M3 12h.01M3 18h.01"></path></svg></div>
+      还没有转存记录<br>去「搜索转存」找一首歌吧</div>`;
+    return;
   }
 
-  const panel = $('#taskPanel');
-  panel.hidden = !taskShown;
-  $('#taskSummary').textContent = active.length ? `正在转存 ${active.length} 首` : '转存记录';
-  $('#taskBody').innerHTML = items.length ? items.map((t) => {
+  const STATE = { queued: '排队中', done: '已完成', failed: '失败' };
+  list.innerHTML = items.map((t) => {
     const pct = Math.round((t.progress || 0) * 100);
-    const cls = t.state === 'failed' ? 'err' : (t.state === 'done' ? 'done' : '');
-    const stateText = { queued: '排队', running: t.stage || '处理中', done: '完成', failed: '失败' }[t.state] || t.state;
+    const stateText = STATE[t.state] || t.stage || '处理中';
+    const canRetry = t.state === 'failed';
+    const canDel = t.state === 'done' || t.state === 'failed';
+    const showBar = t.state === 'running' || t.state === 'queued';
+    const msg = (t.state === 'done' && t.size)
+      ? `已保存到云盘 · ${fmtSize(t.size)}`
+      : (t.message || (t.size ? fmtSize(t.size) : ''));
     return `
-      <div class="task ${cls}">
-        <div class="task-top">
-          <span class="task-name" title="${esc(t.title)}">${esc(t.title)}</span>
-          <span class="task-state">${esc(stateText)}</span>
+      <div class="trow ${t.state}">
+        <div class="trow-top">
+          <span class="trow-title" title="${esc(t.title)}">${esc(t.title)}</span>
+          <span class="trow-state ${t.state}">${esc(stateText)}</span>
         </div>
-        <div class="bar"><i style="width:${t.state === 'done' ? 100 : pct}%"></i></div>
-        <div class="task-msg ${t.state === 'failed' ? 'err' : ''}">${esc(t.message || (t.size ? fmtSize(t.size) : ''))}</div>
+        ${showBar ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+        <div class="trow-foot">
+          <span class="trow-msg ${t.state === 'failed' ? 'err' : ''}">${esc(msg)}</span>
+          <span class="trow-time">${ago(t.created)}</span>
+          <span class="trow-acts">
+            ${canRetry ? `<button class="mini-btn" onclick="retryTask('${t.id}')">重试</button>` : ''}
+            ${canDel ? `<button class="mini-btn del" onclick="delTask('${t.id}')">删除</button>` : ''}
+          </span>
+        </div>
       </div>`;
-  }).join('') : `<div class="task-msg">还没有任务</div>`;
+  }).join('');
 }
 
-function toggleTaskPanel() {
-  taskShown = !taskShown;
-  $('#taskPanel').hidden = !taskShown;
-  if (taskShown) { clearTimeout(taskTimer); pollTasks(); }
+async function retryTask(id) {
+  try {
+    await api('/api/tasks/' + encodeURIComponent(id) + '/retry', { method: 'POST' });
+    toast('已重新提交');
+    pollTasks();
+  } catch (e) {
+    toast(e.message || '重试失败', true);
+  }
+}
+
+async function retryAllFailed() {
+  const n = lastTasks.filter((t) => t.state === 'failed').length;
+  if (!n) return;
+  if (!confirm(`重试全部 ${n} 条失败任务？`)) return;
+  try {
+    const d = await api('/api/tasks/retry-failed', { method: 'POST' });
+    toast(`已重新提交 ${d.count} 条`);
+    pollTasks();
+  } catch (e) {
+    toast(e.message || '重试失败', true);
+  }
+}
+
+async function delTask(id) {
+  try {
+    await api('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' });
+    lastTasks = lastTasks.filter((t) => t.id !== id);
+    renderTaskPage();
+    updateNavBadge();
+    toast('已删除该记录');
+  } catch (e) {
+    toast(e.message || '删除失败', true);
+  }
+}
+
+async function clearTasks() {
+  const n = lastTasks.filter((t) => t.state === 'done' || t.state === 'failed').length;
+  if (!n) return;
+  if (!confirm(`清空 ${n} 条已结束的记录？\n\n只清记录，云盘里的歌不受影响。`)) return;
+  try {
+    const d = await api('/api/tasks', { method: 'DELETE' });
+    toast(`已清除 ${d.removed} 条`);
+    pollTasks();
+  } catch (e) {
+    toast(e.message || '清除失败', true);
+  }
 }
 
 /* ---------------- 播放器（云盘曲库） ---------------- */
-async function loadLibrary(manual) {
-  clearTimeout(libTimer);
-  const box = $('#libList');
+const LIB_KEY = 'listen.library.v1';
+const LIB_TTL = 10 * 60 * 1000;   // 缓存 10 分钟内直接用
+let libDirty = false;             // 有新转存 / 删歌，需要重拉
+let libBusy = false;
+
+function libCacheGet() {
   try {
-    const d = await api('/api/library');
-    $('#libFolder').textContent = d.folder_name ? `· ${d.folder_name}` : '';
-    player.list = d.songs || [];
-    if (!player.list.length) {
-      box.innerHTML = `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>云盘里还没有歌<br>去「搜索转存」第一首吧</div>`;
-    } else {
-      renderLib();
-    }
-  } catch (e) {
-    box.innerHTML = e.status === 401
-      ? `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg></div>先在设置里连接天翼云盘<br><br><button class="btn" onclick="openCloud()">扫码连接</button></div>`
-      : `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M8 15s1.5-2 4-2 4 2 4 2M9 9h.01M15 9h.01"></path></svg></div>${esc(e.message)}</div>`;
-    if (manual) toast(e.message, true);
+    const raw = localStorage.getItem(LIB_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.songs)) return null;
+    return d;
+  } catch (e) { return null; }
+}
+
+function libCacheSet(songs, folder) {
+  try {
+    localStorage.setItem(LIB_KEY, JSON.stringify({ songs, folder: folder || '', ts: Date.now() }));
+  } catch (e) { /* 隐私模式或超配额：忽略 */ }
+}
+
+/* 进入播放器页：有缓存就直接渲染，不重复请求云盘 */
+async function loadLibrary(force) {
+  if (force) return refreshLibrary({ fresh: true, notify: true });
+  if (libDirty) return refreshLibrary({});
+  const c = libCacheGet();
+  if (c) {
+    player.list = c.songs;
+    $('#libFolder').textContent = c.folder ? `· ${c.folder}` : '';
+    renderLibOrEmpty();
+    if (Date.now() - (c.ts || 0) > LIB_TTL) refreshLibrary({ silent: true });
+    return;
   }
-  // 页面打开期间每 30 秒同步一次云盘（删了歌列表会自动消失）
-  libTimer = setTimeout(() => { if (!$('#page-player').hidden) loadLibrary(); }, 30000);
+  return refreshLibrary({ loading: true });
+}
+
+/* 真正拉云盘曲库：loading 显示骨架，fresh 绕过服务端缓存，silent 失败不打扰 */
+async function refreshLibrary(o) {
+  const opt = o || {};
+  if (libBusy) return;
+  libBusy = true;
+  const box = $('#libList');
+  if (opt.loading && !player.list.length) {
+    box.innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`;
+  }
+  try {
+    const d = await api('/api/library' + (opt.fresh ? '?fresh=1' : ''));
+    player.list = d.songs || [];
+    $('#libFolder').textContent = d.folder_name ? `· ${d.folder_name}` : '';
+    libCacheSet(player.list, d.folder_name);
+    libDirty = false;
+    renderLibOrEmpty();
+  } catch (e) {
+    if (!player.list.length) renderLibError(e);
+    if (opt.notify) toast(e.message, true);
+  } finally {
+    libBusy = false;
+  }
+}
+
+function renderLibOrEmpty() {
+  if (!player.list.length) {
+    $('#libList').innerHTML = `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>云盘里还没有歌<br>去「搜索转存」第一首吧</div>`;
+    return;
+  }
+  renderLib();
+}
+
+function renderLibError(e) {
+  $('#libList').innerHTML = e.status === 401
+    ? `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg></div>先在设置里连接天翼云盘<br><br><button class="btn" onclick="openCloud()">扫码连接</button></div>`
+    : `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M8 15s1.5-2 4-2 4 2 4 2M9 9h.01M15 9h.01"></path></svg></div>${esc(e.message)}</div>`;
 }
 
 function renderLib() {
   const NOTE = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:#7f8ea6"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
-  const WAVE = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#2f6bff" stroke-width="2" stroke-linecap="round"><path d="M3 12h2l2-6 3 12 3-9 2 3h6"></path></svg>`;
+  const EQ = `<span class="eq"><i></i><i></i><i></i></span>`;
   const box = $('#libList');
   box.innerHTML = player.list.map((s, i) => `
     <div class="lib-row ${i === player.idx ? 'playing' : ''}" onclick="playSong(${i})">
-      <div class="lib-ico">${i === player.idx ? WAVE : NOTE}</div>
+      <div class="lib-ico">${i === player.idx ? EQ : NOTE}</div>
       <div class="lib-name">
         <b>${esc(s.title)}</b>
         <span>${fmtSize(s.size)}</span>
@@ -386,6 +561,22 @@ function playSong(i) {
   setPlayIcon(true);
   refreshPlayerUI();
   renderLib();
+  ensureDuration();
+}
+
+/* 网络慢时元数据可能迟迟不来：最多盯 12 秒，拿到就把时长填上 */
+function ensureDuration() {
+  const a = audio();
+  let n = 0;
+  const timer = setInterval(() => {
+    n += 1;
+    if (a.duration) {
+      $('#nowDur').textContent = fmtTime(a.duration);
+      clearInterval(timer);
+    } else if (n > 24) {
+      clearInterval(timer);
+    }
+  }, 500);
 }
 
 /* 播放器页显示「正在播放」大卡片；其他页显示底部悬浮条，两者不重复 */
@@ -404,6 +595,7 @@ function togglePlay() {
   if (a.paused) { a.play().catch(() => {}); } else { a.pause(); }
 }
 function setPlayIcon(playing) {
+  document.body.classList.toggle('playing', !!playing);
   $('#mpIconPlay').style.display = playing ? 'none' : '';
   $('#mpIconPause').style.display = playing ? '' : 'none';
   const np = $('#nowIconPlay'), nq = $('#nowIconPause');
@@ -518,7 +710,7 @@ async function pollQr() {
     st.textContent = '登录成功，正在读取账号…';
     st.className = 'qr-state ok';
     clearInterval(qrTimer);
-    setTimeout(async () => { await loadStatus(); closeQr(); loadLibrary(); toast('云盘已连接'); }, 600);
+    setTimeout(async () => { await loadStatus(); closeQr(); loadLibrary(true); toast('云盘已连接'); }, 600);
     return;
   }
   if (s.state === 'waiting') { st.textContent = '等待扫码…'; st.className = 'qr-state'; }
@@ -655,7 +847,9 @@ $('#q') && $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') d
 (async function init() {
   renderHot();
   bindAudio();
-  await loadStatus();
+  // 先把本地缓存吐出来，页面一打开就有内容，不用等网络
   loadSearchCache();
+  loadTasksCache();
+  loadStatus();     // 不 await，避免挡住上面的渲染
   pollTasks();
 })();
