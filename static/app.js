@@ -8,7 +8,7 @@ let qrTimer = null;
 let taskTimer = null;
 let libTimer = null;
 
-let player = { list: [], idx: -1, retried: false };
+let player = { list: [], idx: -1, retried: false, now: false };
 const audio = () => $('#audio');
 
 /* ---------------- 工具 ---------------- */
@@ -51,6 +51,7 @@ function go(page) {
   $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
   if (page === 'player') loadLibrary();
   if (page === 'settings') { loadStatus(); loadSourceList(); renderSettings(); renderInvHosts(); }
+  refreshPlayerUI();
   window.scrollTo(0, 0);
 }
 
@@ -120,26 +121,64 @@ async function doSearch() {
   $('#results').innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="spinner" style="margin:0 auto 14px"></div>正在找…</div>`;
   try {
     const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ q, limit: 18 }) });
-    renderResults(data.items || []);
+    LS_LAST_Q = q;
+    LS_LAST_ITEMS = data.items || [];
+    renderResults(LS_LAST_ITEMS, q, false);
+    saveSearchCache();
   } catch (e) {
-    $('#results').innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="big">😕</div>${esc(e.message)}</div>`;
+    $('#results').innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M8 15s1.5-2 4-2 4 2 4 2M9 9h.01M15 9h.01"></path></svg></div>${esc(e.message)}</div>`;
   } finally {
     btn.disabled = false; btn.textContent = '搜索';
   }
 }
 
-function renderResults(items) {
+/* ---------------- 上次搜索结果缓存 ---------------- */
+const LS_KEY = 'listen.lastSearch.v1';
+let LS_LAST_Q = '';
+let LS_LAST_ITEMS = [];
+
+function saveSearchCache() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      q: LS_LAST_Q, t: Date.now(), items: LS_LAST_ITEMS.slice(0, 18),
+    }));
+  } catch (e) { /* 隐私模式 / 超配额：忽略 */ }
+}
+
+function loadSearchCache() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.items) || !d.items.length) return false;
+    LS_LAST_Q = d.q || '';
+    LS_LAST_ITEMS = d.items.slice(0, 18);
+    if (LS_LAST_Q) $('#q').value = LS_LAST_Q;
+    renderResults(LS_LAST_ITEMS, LS_LAST_Q, true);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function renderResults(items, keyword, stale) {
   const box = $('#results');
   if (!items.length) {
-    box.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="big">🔍</div>没找到，换个关键词试试</div>`;
+    box.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></div>没找到，换个关键词试试</div>`;
     return;
   }
-  box.innerHTML = items.map((it, i) => `
+  const head = keyword
+    ? `<div class="results-head">
+         <span class="rh-q">${stale ? '上次结果 · ' : ''}「${esc(keyword)}」</span>
+         <span class="rh-n">${items.length} 首</span>
+       </div>`
+    : '';
+  box.innerHTML = head + items.map((it, i) => `
     <article class="card" style="animation-delay:${Math.min(i * 22, 260)}ms">
       <div class="thumb">
         <img loading="lazy" src="${esc(it.thumb || '/api/thumb/' + it.id)}" alt=""
              onerror="this.onerror=()=>{this.style.opacity=.15};this.src='/api/thumb/${esc(it.id)}'">
-        <span class="dur">${esc(it.duration_text)}</span>
+        ${it.duration_text ? `<span class="dur">${esc(it.duration_text)}</span>` : ''}
       </div>
       <div class="card-body">
         <h3 class="card-title" title="${esc(it.title)}">${esc(it.title)}</h3>
@@ -197,6 +236,22 @@ async function pollTasks() {
   }
 }
 
+/* 完成 / 失败只闪一次，避免每次轮询都弹出来 */
+function flashFabOnce(kind, num, items) {
+  const tid = (items[0] && items[0].id) || '';
+  let seen = '';
+  try { seen = localStorage.getItem('listen.fabSeen.v1') || ''; } catch (e) { /* 忽略 */ }
+  if (!tid || tid === seen) return false;
+  try { localStorage.setItem('listen.fabSeen.v1', tid); } catch (e) { /* 忽略 */ }
+  const fab = $('#taskFab');
+  fab.hidden = false;
+  fab.classList.remove('done', 'err');
+  fab.classList.add(kind);
+  $('#fabNum').textContent = num;
+  doneFlashTimer = setTimeout(() => { fab.hidden = true; doneFlashTimer = null; }, 6000);
+  return true;
+}
+
 function renderTasks(items) {
   const fab = $('#taskFab');
   if (!fab) return;
@@ -212,17 +267,11 @@ function renderTasks(items) {
     $('#fabNum').textContent = active.length;
     $('#fabRing').style.strokeDashoffset = C * (1 - total);
   } else if (items.length && items[0].state === 'done' && !doneFlashTimer) {
-    // 刚全部完成：✓ 闪 4 秒消失
-    fab.hidden = false;
-    fab.classList.add('done');
-    fab.classList.remove('err');
-    $('#fabNum').textContent = '✓';
-    doneFlashTimer = setTimeout(() => { fab.hidden = true; doneFlashTimer = null; }, 4000);
-  } else if (items.length && items[0].state === 'failed') {
-    fab.hidden = false;
-    fab.classList.add('err');
-    fab.classList.remove('done');
-    $('#fabNum').textContent = '!';
+    // 刚全部完成：✓ 闪一次后消失（同一任务不重复提醒）
+    if (!flashFabOnce('done', '✓', items)) fab.hidden = true;
+  } else if (items.length && items[0].state === 'failed' && !doneFlashTimer) {
+    // 有失败：! 闪一次后消失，不长期挂着
+    if (!flashFabOnce('err', '!', items)) fab.hidden = true;
   } else {
     fab.hidden = true;
   }
@@ -261,14 +310,14 @@ async function loadLibrary(manual) {
     $('#libFolder').textContent = d.folder_name ? `· ${d.folder_name}` : '';
     player.list = d.songs || [];
     if (!player.list.length) {
-      box.innerHTML = `<div class="empty"><div class="big">🎵</div>云盘里还没有歌<br>去「搜索转存」第一首吧</div>`;
+      box.innerHTML = `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>云盘里还没有歌<br>去「搜索转存」第一首吧</div>`;
     } else {
       renderLib();
     }
   } catch (e) {
     box.innerHTML = e.status === 401
-      ? `<div class="empty"><div class="big">🔒</div>先在设置里连接天翼云盘<br><br><button class="btn" onclick="openCloud()">扫码连接</button></div>`
-      : `<div class="empty"><div class="big">😕</div>${esc(e.message)}</div>`;
+      ? `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg></div>先在设置里连接天翼云盘<br><br><button class="btn" onclick="openCloud()">扫码连接</button></div>`
+      : `<div class="empty"><div class="big"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M8 15s1.5-2 4-2 4 2 4 2M9 9h.01M15 9h.01"></path></svg></div>${esc(e.message)}</div>`;
     if (manual) toast(e.message, true);
   }
   // 页面打开期间每 30 秒同步一次云盘（删了歌列表会自动消失）
@@ -289,7 +338,34 @@ function renderLib() {
       <button class="icon-btn" title="播放" onclick="event.stopPropagation();playSong(${i})">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>
       </button>
+      <button class="icon-btn del" title="从云盘删除" onclick="event.stopPropagation();delSong(${i})">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"></path><path d="M10 11v5M14 11v5"></path></svg>
+      </button>
     </div>`).join('');
+}
+
+function delSong(i) {
+  const s = player.list[i];
+  if (!s) return;
+  if (!confirm(`从云盘删除这首歌？\n\n${s.title}\n\n删除后进天翼云盘回收站，可以还原。`)) return;
+  fetch('/api/library/' + encodeURIComponent(s.id), { method: 'DELETE' })
+    .then((r) => r.json().catch(() => ({})).then((d) => {
+      if (!r.ok) throw new Error(d.detail || d.message || ('删除失败 ' + r.status));
+      const wasPlaying = player.idx === i;
+      player.list.splice(i, 1);
+      if (wasPlaying) {
+        const a = audio();
+        a.pause(); a.removeAttribute('src'); a.load();
+        player.idx = -1; player.retried = false; player.now = false;
+        refreshPlayerUI();
+      } else if (player.idx > i) {
+        player.idx--;
+      }
+      renderLib();
+      toast('已删除：' + s.title);
+      loadLibrary(true);
+    }))
+    .catch((e) => toast(e.message || '删除失败', true));
 }
 
 function playSong(i) {
@@ -297,14 +373,29 @@ function playSong(i) {
   player.idx = (i + player.list.length) % player.list.length;
   const song = player.list[player.idx];
   player.retried = false;
+  player.now = true;
   const a = audio();
   a.src = `/api/play/${encodeURIComponent(song.id)}?t=${Date.now()}`;
   a.play().catch(() => {});
-  $('#miniPlayer').hidden = false;
   $('#mpTitle').textContent = song.title;
   $('#mpArtist').textContent = '天翼云盘 · 直接播放';
+  $('#nowTitle').textContent = song.title;
+  $('#nowBar').style.width = '0%';
+  $('#nowCur').textContent = '0:00';
+  $('#nowDur').textContent = '0:00';
   setPlayIcon(true);
+  refreshPlayerUI();
   renderLib();
+}
+
+/* 播放器页显示「正在播放」大卡片；其他页显示底部悬浮条，两者不重复 */
+function refreshPlayerUI() {
+  const has = !!player.now && player.idx >= 0 && !!player.list[player.idx];
+  const onPlayer = !$('#page-player').hidden;
+  $('#nowCard').hidden = !(has && onPlayer);
+  $('#miniPlayer').hidden = !(has && !onPlayer);
+  document.body.classList.toggle('with-mini', !$('#miniPlayer').hidden);
+  if (has) $('#mpTitle').textContent = player.list[player.idx].title;
 }
 
 function togglePlay() {
@@ -315,6 +406,15 @@ function togglePlay() {
 function setPlayIcon(playing) {
   $('#mpIconPlay').style.display = playing ? 'none' : '';
   $('#mpIconPause').style.display = playing ? '' : 'none';
+  const np = $('#nowIconPlay'), nq = $('#nowIconPause');
+  if (np) np.style.display = playing ? 'none' : '';
+  if (nq) nq.style.display = playing ? '' : 'none';
+}
+
+function fmtTime(sec) {
+  if (!sec || !isFinite(sec)) return '0:00';
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return m + ':' + String(s).padStart(2, '0');
 }
 function prevSong() { if (player.list.length) playSong(player.idx - 1); }
 function nextSong() { if (player.list.length) playSong(player.idx + 1); }
@@ -328,8 +428,25 @@ function seek(ev) {
 
 function bindAudio() {
   const a = audio();
+  // 元数据一到就显示总时长，不必等播放推进
+  const syncDur = () => {
+    $('#nowDur').textContent = fmtTime(a.duration);
+    if (a.duration && a.currentTime) {
+      const pct = (a.currentTime / a.duration * 100) + '%';
+      $('#mpBar').style.width = pct;
+      $('#nowBar').style.width = pct;
+    }
+  };
+  a.addEventListener('loadedmetadata', syncDur);
+  a.addEventListener('durationchange', syncDur);
   a.addEventListener('timeupdate', () => {
-    if (a.duration) $('#mpBar').style.width = (a.currentTime / a.duration * 100) + '%';
+    if (a.duration) {
+      const pct = (a.currentTime / a.duration * 100) + '%';
+      $('#mpBar').style.width = pct;
+      $('#nowBar').style.width = pct;
+    }
+    $('#nowCur').textContent = fmtTime(a.currentTime);
+    $('#nowDur').textContent = fmtTime(a.duration);
   });
   a.addEventListener('play', () => setPlayIcon(true));
   a.addEventListener('pause', () => setPlayIcon(false));
@@ -539,5 +656,6 @@ $('#q') && $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') d
   renderHot();
   bindAudio();
   await loadStatus();
+  loadSearchCache();
   pollTasks();
 })();
