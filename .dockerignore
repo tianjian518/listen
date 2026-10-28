@@ -1,0 +1,9 @@
+config.json
+downloads/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+.github/
+.env
