@@ -873,7 +873,8 @@ async function pollQr() {
   if (s.state === 'waiting') { st.textContent = '等待扫码…'; st.className = 'qr-state'; }
   else if (s.state === 'scanned') { st.textContent = '已扫描，请在手机上点「确认」'; st.className = 'qr-state ok'; }
   else if (s.state === 'error') { st.textContent = s.message || '出错了'; st.className = 'qr-state err'; clearInterval(qrTimer); }
-  else if (s.state === 'starting') { st.textContent = '正在启动浏览器…'; }
+  else if (s.state === 'starting') { st.textContent = '正在获取二维码…'; }
+  else if (s.state === 'expired') { st.textContent = s.message || '二维码过期，点重新生成'; st.className = 'qr-state err'; clearInterval(qrTimer); }
 }
 
 function refreshQr() { status.logged_in ? openCloud() : startQr(); }

@@ -2,7 +2,6 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    CHROME_PATH=/usr/bin/chromium \
     PORT=8000
 
 # 构建时的软件源，默认官方。国内网络慢可加：
@@ -11,19 +10,23 @@ ENV PYTHONUNBUFFERED=1 \
 ARG APT_MIRROR=""
 ARG PIP_INDEX=""
 
-# 系统依赖：ffmpeg（音频转码）+ chromium（扫码登录）+ playwright 运行库
-RUN if [ -n "$APT_MIRROR" ]; then \
+# 系统依赖只有 ffmpeg（音频转码）。扫码登录走纯 HTTP，不需要浏览器。
+# 顺带删掉两样用不上的：ffmpeg 硬依赖的 libplacebo 会拖进一整套 Mesa 图形栈
+# （LLVM 124M + gallium 41M + z3 27M），以及 doc / man / 非中文 locale。
+# 删完实测 wma → m4a 转码正常。
+RUN set -eux; \
+    if [ -n "$APT_MIRROR" ]; then \
         sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null \
         || sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list 2>/dev/null || true; \
-    fi \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        chromium \
-        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-        libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
-        fonts-liberation curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /usr/lib/x86_64-linux-gnu/libLLVM.so.* \
+          /usr/lib/x86_64-linux-gnu/libgallium*.so* \
+          /usr/lib/x86_64-linux-gnu/libz3.so.*; \
+    rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/locale/* /usr/share/info/*; \
+    mkdir -p /usr/share/locale/zh_CN
 
 WORKDIR /app
 
@@ -32,7 +35,8 @@ RUN if [ -n "$PIP_INDEX" ]; then \
         pip install --index-url "$PIP_INDEX" -r requirements.txt; \
     else \
         pip install -r requirements.txt; \
-    fi
+    fi \
+    && pip uninstall -y pip setuptools wheel 2>/dev/null || true
 
 COPY . .
 

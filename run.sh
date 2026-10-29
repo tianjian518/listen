@@ -11,5 +11,4 @@ if [ ! -x "$VENV/bin/uvicorn" ]; then
   exit 1
 fi
 
-export CHROME_PATH="${CHROME_PATH:-/usr/bin/chromium}"
 exec "$VENV/bin/uvicorn" app:app --host 0.0.0.0 --port "$PORT" --workers 1

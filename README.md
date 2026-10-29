@@ -105,15 +105,20 @@
 ### 方式一：Docker（推荐，最简单）
 
 ```bash
-# 直接拉镜像运行（AMD64 / ARM64 双架构均支持）
+# 直接拉镜像运行（x86_64 服务器；ARM 设备请走下面的源码方式）
 docker run -d --name listen \
   -p 8000:8000 \
   -v listen-data:/data \
-  tianjian518/listen:2.2.0
+  tianjian518/listen:2.3.0
 
 # 或用 docker-compose
 # 1) 下载 docker-compose.yml
 # 2) 执行：docker compose up -d
+
+# 想自己构建（国内网络加两个参数，从阿里云拉包，快几十倍）
+# docker build --build-arg APT_MIRROR=mirrors.aliyun.com \
+#              --build-arg PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/ \
+#              -t tianjian518/listen:2.3.0 .
 ```
 
 浏览器打开 `http://<你的服务器IP>:8000`，按页面提示扫码登录天翼云盘即可使用。
@@ -123,8 +128,8 @@ docker run -d --name listen \
 ### 方式二：源码运行
 
 ```bash
-# 1. 装系统依赖（ffmpeg + chromium 用于扫码登录）
-sudo apt install -y ffmpeg chromium python3-venv
+# 1. 装系统依赖（只有 ffmpeg，扫码登录走 HTTP，不需要浏览器）
+sudo apt install -y ffmpeg python3-venv
 
 # 2. 建虚拟环境并装依赖
 python3 -m venv /opt/venv && /opt/venv/bin/pip install -r requirements.txt
@@ -170,7 +175,7 @@ listen/
 ├── app.py                  # 网页后端（FastAPI）
 ├── core/
 │   ├── tianyi.py           # 天翼云盘对接：扫码会话 / 分片上传 / 目录
-│   ├── qrlogin.py          # 扫码登录（无头浏览器截二维码）
+│   ├── qrlogin.py          # 扫码登录（纯 HTTP 接口，不依赖浏览器）
 │   ├── media.py            # 搜索 + 下载转 MP3
 │   ├── tasks.py            # 转存任务队列
 │   ├── probe.py            # 音源自动探测
@@ -183,6 +188,12 @@ listen/
 ```
 
 ## 更新日志
+
+### v2.3.0
+- 扫码登录改为纯 HTTP 实现：直接调天翼的登录接口拿二维码和凭证，不再启动无头浏览器
+- 镜像从 1.32GB 降到 800MB 左右，启动更快、内存少几百兆，不再需要装 chromium
+- 顺带清掉镜像里用不到的 Mesa 图形栈（LLVM / gallium / z3，共约 190MB）与文档、语言包
+- 拉取失败自动重试，二维码过期自动换新，不用手动刷新
 
 ### v2.2.0
 - 新增「转码」页：wma / ape / amr / 视频容器 → m4a（或 mp3），转完自动传回云盘原目录
