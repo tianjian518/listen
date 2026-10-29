@@ -20,6 +20,12 @@ _default = {
     "auto_create": True,
     "quality": "0",
     "custom_hosts": [],
+    "book_folder": "有声书",
+    "book_name_order": "auto",
+    "convert_format": "m4a",
+    "convert_bitrate": 96,
+    "convert_keep_origin": True,
+    "convert_video": False,
 }
 
 

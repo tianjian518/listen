@@ -11,3 +11,12 @@ tasks.json
 probe.json
 *.log
 server.log
+progress.json
+progress.tmp
+convert.json
+counts.json
+counts.tmp
+convert.tmp
+
+# 部署备忘（含机器地址，不公开）
+DEPLOY.md

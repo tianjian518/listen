@@ -13,3 +13,9 @@ probe.json
 server.log
 mp.sh
 watchdog.sh
+progress.json
+progress.tmp
+convert.json
+counts.json
+counts.tmp
+convert.tmp

@@ -209,6 +209,71 @@ class TianyiClient:
         ]
         return {"folders": folders, "files": files, "parent": str(folder_id)}
 
+    def list_page(self, folder_id: str = "-11", page_num: int = 1,
+                  page_size: int = 200) -> dict:
+        """单页列举（听书用：大目录要循环翻页）。
+
+        fileListSize 是该目录下的文件总数，翻页时据此判断是否取完；
+        folderList 不分页，第一页就返回全部子文件夹。
+        """
+        r = self._web_get(
+            f"{WEB}/api/open/file/listFiles.action",
+            {
+                "folderId": str(folder_id),
+                "pageSize": str(page_size),
+                "pageNum": str(page_num),
+                "mediaType": "0",
+                "iconOption": "5",
+                "orderBy": "lastOpTime",
+                "descending": "false",
+            },
+            signed=True,
+        )
+        d = r.json()
+        if d.get("res_code") != 0:
+            raise TianyiError(f"读取目录失败：{d.get('res_message', d)}")
+
+        ao = d.get("fileListAO") or {}
+        folders = [
+            {
+                "id": str(f.get("id")),
+                "name": f.get("name", ""),
+                "is_folder": True,
+                "mtime": f.get("lastOpTime", ""),
+            }
+            for f in (ao.get("folderList") or [])
+        ]
+        files = [
+            {
+                "id": str(f.get("id")),
+                "name": f.get("name", ""),
+                "size": int(f.get("size", 0) or 0),
+                "mtime": f.get("lastOpTime", "") or f.get("createDate", ""),
+                "is_folder": False,
+            }
+            for f in (ao.get("fileList") or [])
+        ]
+        # 注意：fileListSize 是「本页返回的条数」，count 才是该目录的文件总数。
+        # 取错字段会以为一页就是全部（469 集只显示 200 集）。
+        total = int(ao.get("count") or 0)
+        return {
+            "folders": folders,
+            "files": files,
+            "total": total,
+            "returned": len(files),
+        }
+
+    def find_folder(self, name: str, parent_id: str = "-11") -> str:
+        """按名字找子文件夹，找不到返回空串（不会创建）"""
+        try:
+            listing = self.list_page(parent_id, 1, 200)
+        except TianyiError:
+            return ""
+        for f in listing["folders"]:
+            if f["name"].strip() == name.strip():
+                return f["id"]
+        return ""
+
     def create_folder(self, parent_id: str, name: str) -> str:
         r = self._web_post(
             f"{WEB}/api/open/file/createFolder.action",
@@ -239,6 +304,36 @@ class TianyiClient:
         if d.get("res_code") != 0 or not d.get("fileDownloadUrl"):
             raise TianyiError(f"获取播放直链失败：{d.get('res_message', d)}")
         return d["fileDownloadUrl"]
+
+    def delete_files(self, file_ids: list[str]) -> bool:
+        """删除文件或文件夹（天翼没有批量接口，逐个删）"""
+        ids = [str(i) for i in (file_ids or []) if i]
+        for fid in ids:
+            r = self._web_post(
+                f"{WEB}/api/open/file/deleteFile.action",
+                data={"fileId": fid},
+            )
+            try:
+                d = r.json()
+            except Exception as e:
+                raise TianyiError("删除请求异常，请稍后再试") from e
+            if d.get("res_code") != 0:
+                raise TianyiError(f"删除失败：{d.get('res_message', d)}")
+        return True
+
+    def rename(self, file_id: str, new_name: str) -> bool:
+        """重命名云盘里的文件（保留原扩展名由调用方负责）"""
+        r = self._web_get(
+            f"{WEB}/api/open/file/renameFile.action",
+            {"fileId": str(file_id), "destFileName": new_name},
+        )
+        try:
+            d = r.json()
+        except Exception as e:
+            raise TianyiError("重命名请求异常，请稍后再试") from e
+        if d.get("res_code") != 0:
+            raise TianyiError(f"重命名失败：{d.get('res_message', d)}")
+        return True
 
     # ---------- 上传 ----------
 
